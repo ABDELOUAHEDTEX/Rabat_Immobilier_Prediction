@@ -1,234 +1,299 @@
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
-import re
+import csv
 import time
 import random
-from tqdm import tqdm
+import re
 import os
-# Chemin du répertoire pour stocker les données
-SCRIPT_DIR = "Rabat_Immobilier_Prediction\\Model\\Scraping"
+from urllib.parse import urljoin
+from datetime import datetime
 
-# Dossier pour stocker les données
-DATA_DIR = SCRIPT_DIR
+class MubawabScraper:
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+        self.session = requests.Session()
+        self.all_links = set()
 
-def get_listing_links(page_url):
-    """Returns: list: Liste des liens des annonces immobilières trouvées sur la page"""
-    try:
-        # Ajout d'un délai pour éviter de surcharger le serveur
-        time.sleep(random.uniform(1, 3))
-        # Envoi de la requête HTTP avec les en-têtes simulant un navigateur
-        response = requests.get(page_url, timeout=30)
-        
-        if response.status_code == 200:
-            # Analyse du contenu HTML avec BeautifulSoup
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Recherche des annonces immobilières dans la liste
-            listing_container = soup.find('div', class_='ulListing')
-            
-            if listing_container:
-                listings = listing_container.find_all('div', class_='listingBox')
-                return [listing['linkref'] for listing in listings if 'linkref' in listing.attrs]
-            else:
-                print(f"Aucune liste d'annonces trouvée sur la page: {page_url}")
-                return []
-        else:
-            print(f"Échec de récupération de la page. Code de statut: {response.status_code}")
-            return []
-    except Exception as e:
-        print(f"Erreur lors de l'extraction des liens: {e}")
-        return []
+    def get_page_content(self, url):
+        """Fetch page content with error handling"""
+        try:
+            response = self.session.get(url, headers=self.headers, timeout=10)
+            response.raise_for_status()
+            return response.text
+        except Exception as e:
+            print(f"Error fetching {url}: {e}")
+            return None
 
-def extract_listing_details(link):
-    """Args:link: URL de l'annonce immobilière
-    Returns:dict: Dictionnaire contenant les détails de l'annonce"""
-    # Initialisation des données par défaut
-    property_data = {
-        'Prix': 'N/A',
-        'Quartier': 'N/A',
-        'Superficie': 'N/A',
-        'Pièces': 'N/A',
-        'Chambres': 'N/A',
-        'Salles_de_bain': 'N/A',
-        'Type_bien': 'N/A',
-        'Etat': 'N/A',
-        'Standing': 'N/A',
-        'Etat_bien': 'N/A',
-        'Ascenseur': 0,
-        'Garage': 0,
-        'Jardin': 0,
-        'Piscine': 0,
-        'Cuisine_équipée': 0,
-        'Vue_sur_mer': 0,
-        'Terrasse': 0,
-        'Sécurité': 0,
-        'URL': link
-    }
-    
-    try:
-        # Ajout d'un délai pour éviter de surcharger le serveur
-        time.sleep(random.uniform(1, 3))
-        
-        # Envoi de la requête HTTP
-        response = requests.get(link, timeout=30)
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
+    def extract_listing_links(self, max_pages=37):
+        """Extract all unique property listing links with improved logic"""
+        for page in range(1, max_pages + 1):
+            page_url = f"{self.base_url}:p:{page}"
+            print(f"Scraping page {page}/{max_pages}: {page_url}")
             
-            # Extraction du prix
-            price_tag = soup.find('h3', class_='orangeTit')
-            if price_tag:
-                property_data['Prix'] = ''.join(filter(str.isdigit, price_tag.get_text(strip=True)))
-            
-            # Extraction du quartier (localisation)
-            quartier_div = soup.find('div', class_='col-8 vAlignM adBread')
-            if quartier_div:
-                quartier_tags = quartier_div.find_all('a', class_='darkblue')
-                if quartier_tags:
-                    property_data['Quartier'] = quartier_tags[-1].get_text(strip=True)
-            
-            # Extraction des détails à partir des icônes
-            details_div = soup.find('div', class_='disFlex adDetails')
-            if details_div:
-                details = details_div.find_all('div', class_='adDetailFeature')
-                for detail in details:
-                    icon = detail.find('i', class_='adDetailFeatureIcon')
-                    value = detail.find('span').get_text(strip=True) if detail.find('span') else 'N/A'
-                    
-                    if icon and 'class' in icon.attrs:
-                        # Extraction de la superficie
-                        if 'icon-triangle' in icon['class']:
-                            superficie_match = re.findall(r'\d+', value)
-                            property_data['Superficie'] = superficie_match[0] if superficie_match else 'N/A'
-                        
-                        # Extraction du nombre de pièces
-                        elif 'icon-house-boxes' in icon['class']:
-                            pieces_match = re.findall(r'\d+', value)
-                            property_data['Pièces'] = pieces_match[0] if pieces_match else 'N/A'
-                        
-                        # Extraction du nombre de chambres
-                        elif 'icon-bed' in icon['class']:
-                            chambres_match = re.findall(r'\d+', value)
-                            property_data['Chambres'] = chambres_match[0] if chambres_match else 'N/A'
-                        
-                        # Extraction du nombre de salles de bain
-                        elif 'icon-bath' in icon['class']:
-                            sdb_match = re.findall(r'\d+', value)
-                            property_data['Salles_de_bain'] = sdb_match[0] if sdb_match else 'N/A'
-            
-            # Extraction des caractéristiques principales
-            features_div = soup.find('div', class_='adFeatures')
-            if features_div:
-                main_features = features_div.find_all('div', class_='adMainFeature')
-                for feature in main_features:
-                    label_tag = feature.find('p', class_='adMainFeatureContentLabel')
-                    value_tag = feature.find('p', class_='adMainFeatureContentValue')
-                    
-                    if label_tag and value_tag:
-                        label = label_tag.get_text(strip=True)
-                        value = value_tag.get_text(strip=True)
-                        
-                        # Assignation des valeurs selon les étiquettes
-                        if label == 'Type de bien':
-                            property_data['Type_bien'] = value
-                        elif label == 'Etat':
-                            property_data['Etat'] = value
-                        elif label == 'Standing':
-                            property_data['Standing'] = value
-                        elif label == 'Etat du bien':
-                            property_data['Etat_bien'] = value
+            html_content = self.get_page_content(page_url)
+            if not html_content:
+                continue
                 
-                # Extraction des caractéristiques supplémentaires
-                extra_tags_div = features_div.find_next('div', class_='adFeatures')
-                if extra_tags_div:
-                    extra_tags = extra_tags_div.find_all('div', class_='adFeature')
-                    for extra_tag in extra_tags:
-                        tag_span = extra_tag.find('span')
-                        if tag_span:
-                            tag_value = tag_span.get_text(strip=True)
-                            
-                            # Vérification des caractéristiques spécifiques
-                            if 'Ascenseur' in tag_value:
-                                property_data['Ascenseur'] = 1
-                            elif 'Garage' in tag_value or 'Parking' in tag_value:
-                                property_data['Garage'] = 1
-                            elif 'Jardin' in tag_value:
-                                property_data['Jardin'] = 1
-                            elif 'Piscine' in tag_value:
-                                property_data['Piscine'] = 1
-                            elif 'Cuisine équipée' in tag_value:
-                                property_data['Cuisine_équipée'] = 1
-                            elif 'Vue sur mer' in tag_value:
-                                property_data['Vue_sur_mer'] = 1
-                            elif 'Terrasse' in tag_value:
-                                property_data['Terrasse'] = 1
-                            elif 'Sécurité' in tag_value or 'Gardien' in tag_value:
-                                property_data['Sécurité'] = 1
+            soup = BeautifulSoup(html_content, 'html.parser')
             
-            return property_data
-        else:
-            print(f"Échec de récupération de l'annonce: {link}. Code de statut: {response.status_code}")
-            return property_data
-    except Exception as e:
-        print(f"Erreur lors de l'extraction des détails de l'annonce {link}: {e}")
-        return property_data
-
-def main(pages=37):
-    # URL de base pour les pages d'annonces immobilières à Rabat
-    base_url = 'https://www.mubawab.ma/fr/ct/rabat/immobilier-a-vendre'
-    
-    print("🏠 Démarrage du scraping des annonces immobilières à Rabat...")
-    # Initialisation d'une liste pour stocker tous les liens d'annonces
-    all_listing_links = []
-    # Nombre de pages à scraper
-    nb_pages = pages
-    # Récupération des liens d'annonces pour chaque page
-    print(f"📋 Collecte des liens d'annonces sur {nb_pages} pages...")
-    for page_number in tqdm(range(1, nb_pages + 1), desc="Progression"):
-        page_url = f"{base_url}:p:{page_number}"
-        links = get_listing_links(page_url)
-        all_listing_links.extend(links)
-        print(f"  Page {page_number}: {len(links)} liens collectés.")
- 
-    total_links = len(all_listing_links)
-    print(f"✅ Total des liens collectés: {total_links}")
-    
-    # Sauvegarde des liens dans un fichier CSV
-    links_df = pd.DataFrame(all_listing_links, columns=['URL'])
-    links_file = os.path.join(DATA_DIR, 'rabat_liens_annonces.csv')
-    links_df.to_csv(links_file, index=False)
-    
-    # Extraction des détails pour chaque annonce
-    print("🔍 Extraction des détails des annonces...")
-    all_property_data = []
-    
-    for idx, link in enumerate(tqdm(all_listing_links, desc="Progression")):
-        print(f"  Traitement de l'annonce {idx+1}/{total_links}: {link}")
-        property_data = extract_listing_details(link)
-        all_property_data.append(property_data)
+            listings = soup.find_all('div', class_=['listingBox', 'listingBoxsPremium'])
+            if not listings:
+                listings = soup.find_all('a', href=re.compile(r'/fr/[pa]/\d+'))
+            
+            if not listings:
+                script_tags = soup.find_all('script', type='text/javascript')
+                for script in script_tags:
+                    if 'listingBox' in str(script):
+                        listings = re.findall(r'href=[\'"]?([^\'" >]+)', str(script))
+                        listings = [l for l in listings if '/fr/[pa]/\d+' in l]
+                        break
+            
+            new_links = set()
+            for listing in listings:
+                if hasattr(listing, 'attrs'):
+                    link = listing.find('a', href=True)
+                    if link:
+                        href = link['href']
+                    else:
+                        href = listing.get('linkref', '')
+                else:
+                    href = listing
+                
+                if not href:
+                    continue
+                
+                if not href.startswith('http'):
+                    href = urljoin('https://www.mubawab.ma', href)
+                clean_url = re.sub(r'\?.*', '', href)
+                
+                if re.match(r'https://www.mubawab.ma/fr/[pa]/\d+', clean_url):
+                    new_links.add(clean_url)
+            
+            new_count = len(new_links - self.all_links)
+            self.all_links.update(new_links)
+            
+            print(f"Found {len(listings)} listing elements, {new_count} new unique links")
+            print(f"Total unique links: {len(self.all_links)}")
+            
+            self.save_links_to_csv()
+            time.sleep(random.uniform(3, 7))
+            
+            if new_count == 0 and page > 5:
+                print("No new links found on multiple pages. Stopping early.")
+                break
         
-        # Sauvegarde intermédiaire tous les 20 enregistrements
-        if (idx + 1) % 20 == 0 or idx == len(all_listing_links) - 1:
-            # Création d'un DataFrame avec les données collectées
-            data_df = pd.DataFrame(all_property_data)
+        return self.all_links
+
+    def save_links_to_csv(self, filename="mubawab_links.csv"):
+        """Save all unique links to CSV"""
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['URL'])
+            writer.writerows([[link] for link in sorted(self.all_links)])
+        print(f"Saved {len(self.all_links)} unique links to {filename}")
+
+    def scrape_listing_details(self, url):
+        """Scrape detailed information from a single property page with additional features"""
+        print(f"Scraping details from: {url}")
+        html_content = self.get_page_content(url)
+        if not html_content:
+            return None
             
-            # Sauvegarde des données brutes dans un fichier CSV, sans aucun traitement
-            output_file = os.path.join(DATA_DIR, 'rabat_données_immobilières_brutes.csv')
-            data_df.to_csv(output_file, index=False)
-            print(f"💾 Sauvegarde intermédiaire: {idx+1} annonces traitées et sauvegardées dans {output_file}")
-    
-    print("✨ Scraping terminé avec succès!")
-    print(f"📊 Les données brutes ont été sauvegardées dans: {DATA_DIR}")
+        soup = BeautifulSoup(html_content, 'html.parser')
+        data = {'url': url}
+        
+        try:
+            prop_id = re.search(r'/fr/[pa]/(\d+)', url)
+            data['id'] = prop_id.group(1) if prop_id else 'N/A'
+            
+            title = soup.find('h1', class_='titleListing')
+            data['title'] = title.get_text(strip=True) if title else 'N/A'
+            
+            price = soup.find('h3', class_='orangeTit')
+            if price:
+                price_text = price.get_text(strip=True)
+                data['price'] = re.sub(r'[^\d]', '', price_text) or 'N/A'
+            else:
+                data['price'] = 'N/A'
+            
+            location = soup.find('h2', class_='greyTit')
+            data['location'] = location.get_text(strip=True) if location else 'N/A'
+            
+            features = {
+                'area': ('icon-triangle', 'm²'),
+                'rooms': ('icon-house-boxes', 'Pièces|places'),
+                'bedrooms': ('icon-bed', 'Chambres'),
+                'bathrooms': ('icon-bath', 'Salles de bain')
+            }
+            
+            for field, (icon_class, pattern) in features.items():
+                icon = soup.find('i', class_=icon_class)
+                if icon:
+                    parent = icon.find_parent('div', class_='adDetailFeature')
+                    if parent:
+                        span = parent.find('span')
+                        if span:
+                            text = span.get_text(strip=True)
+                            match = re.search(r'(\d+)', text)
+                            data[field] = match.group(1) if match else 'N/A'
+                else:
+                    data[field] = 'N/A'
+            
+            desc = soup.find('div', class_='blockDescription')
+            desc_text = desc.get_text(strip=True) if desc else ''
+            data['description'] = desc_text
+            
+            types = ['appartement', 'maison', 'villa', 'terrain', 'bureau', 'studio']
+            lower_title = data['title'].lower()
+            data['type'] = next((t for t in types if t in url.lower() or t in lower_title), 'N/A')
+
+            # Property State
+            property_state = 'N/A'
+            state_tags = soup.find_all('span', class_='tag')
+            state_mapping = {
+                'neuf': 'Neuf',
+                'nouveau': 'Neuf',
+                'ancien': 'Ancien',
+                'bon état': 'Bon état',
+                'à rénover': 'À rénover'
+            }
+            for tag in state_tags:
+                text = tag.get_text(strip=True).lower()
+                for key, value in state_mapping.items():
+                    if key in text:
+                        property_state = value
+                        break
+                if property_state != 'N/A':
+                    break
+            data['property_state'] = property_state
+
+            # Amenities
+            amenities = {
+                'garden': False,
+                'pool': False,
+                'equipped_kitchen': False
+            }
+            
+            desc_lower = desc_text.lower()
+            amenities['garden'] = 'jardin' in desc_lower or 'verdoyant' in desc_lower
+            amenities['pool'] = 'piscine' in desc_lower
+            amenities['equipped_kitchen'] = 'cuisine équipée' in desc_lower or 'cuisine equipee' in desc_lower
+            
+            features_section = soup.find('div', class_='featuresList')
+            if features_section:
+                features_text = features_section.get_text(strip=True).lower()
+                amenities['garden'] = amenities['garden'] or 'jardin' in features_text
+                amenities['pool'] = amenities['pool'] or 'piscine' in features_text
+                amenities['equipped_kitchen'] = amenities['equipped_kitchen'] or 'cuisine équipée' in features_text or 'cuisine equipee' in features_text
+            
+            data.update({
+                'jardin': 'Oui' if amenities['garden'] else 'Non',
+                'piscine': 'Oui' if amenities['pool'] else 'Non',
+                'cuisine_equiped': 'Oui' if amenities['equipped_kitchen'] else 'Non'
+            })
+
+            # Neighborhood
+            neighborhood = 'N/A'
+            if data['location'] != 'N/A':
+                parts = [p.strip() for p in data['location'].split(',')]
+                if len(parts) > 1:
+                    neighborhood = parts[0]
+            
+            if neighborhood == 'N/A' and desc_text:
+                neighborhood_keywords = ['quartier', 'secteur', 'zone', 'hay']
+                for keyword in neighborhood_keywords:
+                    if keyword in desc_text.lower():
+                        start_idx = desc_text.lower().find(keyword)
+                        neighborhood = desc_text[start_idx:].split(',')[0].strip()
+                        break
+            
+            data['quartier'] = neighborhood
+
+            # Status
+            status = 'N/A'
+            status_mapping = {
+                'à vendre': 'À vendre',
+                'à louer': 'À louer',
+                'vendu': 'Vendu',
+                'loué': 'Loué'
+            }
+            for tag in state_tags:
+                text = tag.get_text(strip=True).lower()
+                for key, value in status_mapping.items():
+                    if key in text:
+                        status = value
+                        break
+                if status != 'N/A':
+                    break
+            
+            if status == 'N/A':
+                if '/a-vendre/' in url.lower():
+                    status = 'À vendre'
+                elif '/a-louer/' in url.lower():
+                    status = 'À louer'
+            
+            data['status'] = status
+
+            return data
+            
+        except Exception as e:
+            print(f"Error scraping {url}: {e}")
+            return None
+
+    def scrape_all_listings(self, links_file="mubawab_links.csv", output_file="mubawab_data.csv"):
+        """Scrape details from all saved links with additional fields"""
+        try:
+            with open(links_file, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader)
+                links = [row[0] for row in reader if row]
+        except FileNotFoundError:
+            print(f"Error: {links_file} not found")
+            return
+        
+        print(f"Found {len(links)} listings to scrape")
+        
+        file_exists = os.path.exists(output_file)
+        fieldnames = [
+            'id', 'url', 'title', 'price', 'location', 'type', 
+            'area', 'rooms', 'bedrooms', 'bathrooms', 'description',
+            'property_state', 'jardin', 'piscine', 'cuisine_equiped', 
+            'quartier', 'status'
+        ]
+        
+        with open(output_file, 'a' if file_exists else 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            
+            for i, link in enumerate(links, 1):
+                print(f"Processing {i}/{len(links)}")
+                data = self.scrape_listing_details(link)
+                if data:
+                    writer.writerow(data)
+                    f.flush()
+                
+                time.sleep(random.uniform(5, 10))
+
 if __name__ == "__main__":
-    import argparse
+    BASE_URL = "https://www.mubawab.ma/fr/ct/rabat/immobilier-a-vendre"
+    scraper = MubawabScraper(BASE_URL)
     
-    # Configuration du parser d'arguments
-    parser = argparse.ArgumentParser(description="Script de scraping des annonces immobilières à Rabat")
-    parser.add_argument("--pages", "-p", type=int, default=37, help="Nombre de pages à scraper (défaut: 37)")
+    print("Mubawab Property Scraper")
+    print("1. Extract listing links only")
+    print("2. Scrape property details only")
+    print("3. Run full scraping (links + details)")
     
-    # Analyse des arguments
-    args = parser.parse_args()
+    choice = input("Choose an option (1-3): ")
     
-    # Lancement du scraping avec le nombre de pages spécifié
-    main(pages=args.pages)
+    if choice in ('1', '3'):
+        scraper.extract_listing_links(max_pages=37)
+    
+    if choice in ('2', '3'):
+        scraper.scrape_all_listings()
+    
+    print("Scraping completed!")
